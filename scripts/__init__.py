@@ -1,0 +1,1 @@
+"""Scripts module for ChatISP AI ingestion and maintenance tasks."""

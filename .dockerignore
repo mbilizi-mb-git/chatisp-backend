@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+*.egg-info
+dist
+build
+
+# Environment
+.env
+.env.*
+!.env.example
+venv
+env
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Data (local development)
+/data/vector_store/*
+/data/logs/*
+/data/cache/*
+!/data/vector_store/.gitkeep
+!/data/logs/.gitkeep
+!/data/cache/.gitkeep
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Tests
+tests/
+
+# Documentation
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
+Makefile
+pyproject.toml
+alembic.ini
+alembic/

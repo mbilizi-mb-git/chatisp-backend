@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: chatisp-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-chatisp_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me}
+      - POSTGRES_DB=${POSTGRES_DB:-chatisp_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chatisp_user} -d ${POSTGRES_DB:-chatisp_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatisp-network
+
+  app:
+    build: .
+    container_name: chatisp-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=${APP_NAME}
+      - CREATOR=${CREATOR}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - MODEL_NAME=${MODEL_NAME}
+      - TEMPERATURE=${TEMPERATURE}
+      - MAX_TOKENS=${MAX_TOKENS}
+      - GROQ_RATE_LIMIT_MAX_CALLS=${GROQ_RATE_LIMIT_MAX_CALLS}
+      - GROQ_RATE_LIMIT_PERIOD=${GROQ_RATE_LIMIT_PERIOD}
+      - GROQ_RATE_LIMIT_MAX_WAIT=${GROQ_RATE_LIMIT_MAX_WAIT}
+      - GROQ_DAILY_TOKEN_QUOTA=${GROQ_DAILY_TOKEN_QUOTA}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - CHROMA_PATH=${CHROMA_PATH}
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD}
+      - MEMORY_LIMIT=${MEMORY_LIMIT}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-chatisp_user}:${POSTGRES_PASSWORD:-change_me}@db:5432/${POSTGRES_DB:-chatisp_db}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - LOG_FILE=${LOG_FILE}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - POSTGRES_USER=${POSTGRES_USER:-chatisp_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-chatisp_db}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - chatisp-network
+
+volumes:
+  postgres_data:
+
+networks:
+  chatisp-network:
+    driver: bridge

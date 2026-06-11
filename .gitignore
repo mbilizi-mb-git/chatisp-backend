@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+env/
+.env
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+*.db
+*.db-journal
+
+# Project data
+/data/vector_store/
+/data/logs/
+/data/cache/
+/data/documents/*.pdf
+/data/documents/*.txt
+/data/documents/*.docx
+!/data/documents/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

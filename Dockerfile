@@ -9,15 +9,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies (if any)
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip and clear cache to avoid hash mismatches
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip cache purge
+
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt --retries 5 --timeout 30
 
 # Copy project
 COPY . .

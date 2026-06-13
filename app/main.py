@@ -1,6 +1,7 @@
 """
 Point d'entrée principal de l'application FastAPI.
-Configuration des routes, CORS, démarrage/arrêt, et intégration de l'authentification.
+Configuration des routes, CORS, démarrage/arrêt.
+Les modèles lourds (ChromaDB, embeddings) sont chargés à la demande.
 """
 
 import logging
@@ -13,39 +14,30 @@ from app.core.config import get_settings
 from app.core.database import init_db, close_db
 from app.core.logging import configure_logging
 from app.api.endpoints import conversations, messages, health, auth, admin
-from app.rag.vector_store import VectorStore
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-# Configure logging au démarrage
 configure_logging()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gère les événements de démarrage et d'arrêt de l'application."""
-    # Startup
+    """Gère les événements de démarrage et d'arrêt."""
     logger.info("Démarrage de ChatISP AI backend")
     await init_db()
     logger.info("Base de données initialisée")
 
-    # Initialisation du vector store
-    try:
-        vector_store = VectorStore()
-        await vector_store.ensure_collection()
-        logger.info("Vector store prêt")
-    except Exception as e:
-        logger.error(f"Échec de l'initialisation du vector store: {e}")
+    # ⚠️ NE PAS charger le vector store ici – il sera initialisé à la première requête
+    # pour économiser la mémoire (lazy loading).
+    logger.info("Vector store sera chargé à la première utilisation (lazy loading)")
 
     yield
 
-    # Shutdown
     await close_db()
     logger.info("Connexions à la base de données fermées")
 
 
-# Création de l'application FastAPI
 app = FastAPI(
     title=settings.APP_NAME,
     version="1.0.0",
@@ -54,7 +46,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configuration CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -63,7 +55,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inclusion des routeurs
+# Routers
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(conversations.router, prefix="/api/v1")
 app.include_router(messages.router, prefix="/api/v1")

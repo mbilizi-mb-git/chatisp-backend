@@ -1,7 +1,7 @@
 """
 Point d'entrée principal de l'application FastAPI.
 Configuration des routes, CORS, démarrage/arrêt.
-Le vector store est préchargé au démarrage pour éviter les lenteurs au premier appel.
+Les modèles lourds (ChromaDB, embeddings) sont chargés à la demande.
 """
 
 import logging
@@ -14,7 +14,6 @@ from app.core.config import get_settings
 from app.core.database import init_db, close_db
 from app.core.logging import configure_logging
 from app.api.endpoints import conversations, messages, health, auth, admin
-from app.rag.vector_store import VectorStore
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -29,15 +28,9 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Base de données initialisée")
 
-    # Précharger le vector store (modèles d'embedding) pour éviter le temps de chargement
-    # lors de la première requête. Si le chargement échoue, on continue (lazy loading fera le travail).
-    try:
-        vector_store = VectorStore()
-        await vector_store.ensure_collection()
-        logger.info("Vector store chargé et prêt (préchauffage réussi)")
-    except Exception as e:
-        logger.error(f"Échec du préchargement du vector store: {e}")
-        logger.info("Le vector store sera chargé à la première utilisation (lazy loading)")
+    # ⚠️ NE PAS charger le vector store ici – il sera initialisé à la première requête
+    # pour économiser la mémoire (lazy loading).
+    logger.info("Vector store sera chargé à la première utilisation (lazy loading)")
 
     yield
 

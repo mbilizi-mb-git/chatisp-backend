@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Base de données (PostgreSQL recommandé en production)
-    # Exemple de format pour PostgreSQL : postgresql+asyncpg://user:pass@localhost:5432/dbname
     DATABASE_URL: str = "postgresql+asyncpg://chatisp_user:change_me@localhost:5432/chatisp_db"
 
     # Pour faciliter le déploiement, on peut aussi décomposer (optionnel)
@@ -36,11 +35,11 @@ class Settings(BaseSettings):
     # Sécurité JWT
     JWT_SECRET_KEY: str = "change_this_in_production_use_env_variable"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_DAYS: int = 30          # 30 jours pour email/mdp
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 180        # 6 mois pour Google
+    ACCESS_TOKEN_EXPIRE_DAYS: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 180
 
     # Google OAuth2
-    GOOGLE_CLIENT_ID: str = ""   # À remplir dans .env
+    GOOGLE_CLIENT_ID: str = ""
 
     # RAG & Embeddings
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -60,15 +59,20 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "*"
 
-    # Limites Groq (optionnelles, gardées pour compatibilité)
-    GROQ_API_KEY: str = ""
-    MODEL_NAME: str = ""
+    # Groq LLM (optionnel, conservé pour fallback ou pour les utilisateurs qui veulent garder les deux)
+    GROQ_API_KEY: str = ""  # vide par défaut pour éviter les erreurs si non définie
+    MODEL_NAME: str = "mixtral-8x7b-32768"
     TEMPERATURE: float = 0.7
-    MAX_TOKENS: int = 4096
+    MAX_TOKENS: int = 1000000
     GROQ_RATE_LIMIT_MAX_CALLS: int = 30
     GROQ_RATE_LIMIT_PERIOD: int = 60
     GROQ_RATE_LIMIT_MAX_WAIT: int = 10
     GROQ_DAILY_TOKEN_QUOTA: int = 1_000_000
+
+    # Google Gemini
+    GEMINI_API_KEY: str = ""   # à remplir dans .env
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_CACHE_TTL: int = 86400  # Durée de vie du cache en secondes (1 J )
 
     @property
     def cors_origins_list(self) -> List[str]:
@@ -89,7 +93,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
-        extra="ignore",  # Ignorer les variables inconnues
+        extra="ignore",
     )
 
 

@@ -1,7 +1,7 @@
 """
 Point d'entrée principal de l'application FastAPI.
 Configuration des routes, CORS, démarrage/arrêt.
-Les modèles lourds (ChromaDB, embeddings) sont chargés à la demande.
+Le vector store et le LLMEngine sont préchargés au démarrage pour éviter les lenteurs.
 """
 
 import logging
@@ -14,11 +14,13 @@ from app.core.config import get_settings
 from app.core.database import init_db, close_db
 from app.core.logging import configure_logging
 from app.api.endpoints import conversations, messages, health, auth, admin
+from app.rag.vector_store import VectorStore
+from app.rag.llm_engine import LLMEngine
+from app.services.rag_service import RagService
+from app.services.rag_singleton import set_rag_service
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
-
-configure_logging()
 
 
 @asynccontextmanager
@@ -28,9 +30,34 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Base de données initialisée")
 
-    # ⚠️ NE PAS charger le vector store ici – il sera initialisé à la première requête
-    # pour économiser la mémoire (lazy loading).
-    logger.info("Vector store sera chargé à la première utilisation (lazy loading)")
+    # Préchargement du vector store (modèle d'embedding)
+    vector_store = None
+    try:
+        vector_store = VectorStore()
+        await vector_store.ensure_collection()
+        logger.info("Vector store chargé et prêt (préchauffage réussi)")
+    except Exception as e:
+        logger.error(f"Échec du préchargement du vector store: {e}")
+        logger.info("Le vector store sera chargé à la première utilisation (lazy loading)")
+
+    # Préchargement du LLMEngine (cache Gemini + embedding model)
+    if vector_store:
+        try:
+            llm_engine = LLMEngine(vector_store)
+            # Charger le modèle d'embedding explicitement
+            await llm_engine.load_embedding_model()
+            logger.info("LLMEngine préchargé avec succès")
+            # Créer le service RAG avec les instances préchargées
+            rag_service = RagService(
+                db=None,  # sera passé dans les endpoints
+                vector_store=vector_store,
+                llm_engine=llm_engine
+            )
+            set_rag_service(rag_service)  # Stocker dans le singleton
+            logger.info("RagService initialisé avec succès")
+        except Exception as e:
+            logger.error(f"Échec du préchargement du LLMEngine: {e}")
+            set_rag_service(None)
 
     yield
 

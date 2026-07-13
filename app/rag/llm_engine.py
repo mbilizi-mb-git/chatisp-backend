@@ -4,8 +4,7 @@ import re
 import numpy as np
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
-import groq
-from groq import AsyncGroq
+import google.generativeai as genai
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
@@ -18,6 +17,7 @@ from app.utils.token_counter import TokenCounter
 logger = logging.getLogger(__name__)
 settings = get_settings()
 prompt_manager = PromptManager()
+
 rate_limiter = RateLimiter(
     max_calls=settings.GROQ_RATE_LIMIT_MAX_CALLS,
     period=settings.GROQ_RATE_LIMIT_PERIOD,
@@ -27,20 +27,66 @@ token_counter = TokenCounter(daily_quota=settings.GROQ_DAILY_TOKEN_QUOTA)
 
 
 class LLMEngine:
-    """Advanced RAG engine with hybrid search, reranking, and streaming."""
+    """Advanced RAG engine with hybrid search, reranking, and streaming using Google Gemini with Context Caching."""
 
     def __init__(self, vector_store: VectorStore):
         self.vector_store = vector_store
-        self.client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        genai.configure(api_key=settings.GEMINI_API_KEY)
         self._embedding_model = None
+        self._cached_content = None
+        self._cache_id = None
+        self._system_prompt = prompt_manager.get_system_prompt()
 
-    async def _get_embedding_model(self) -> SentenceTransformer:
-        """Lazy load the sentence transformer model for embeddings."""
+        # Créer le cache au démarrage (préchargement)
+        self._create_cache()
+
+        # Le modèle d'embedding sera chargé explicitement plus tard via load_embedding_model()
+        # pour ne pas bloquer le démarrage.
+
+    def _create_cache(self) -> None:
+        """Crée un cache contextuel pour le prompt système (préchargement)."""
+        try:
+            logger.info("Création du cache contextuel Gemini...")
+            self._cached_content = genai.caching.CachedContent.create(
+                model=settings.GEMINI_MODEL,
+                display_name="chatisp_system_prompt",
+                system_instruction=self._system_prompt,
+                ttl=settings.GEMINI_CACHE_TTL,
+            )
+            self._cache_id = self._cached_content.name
+            logger.info(f"Cache créé avec succès, ID: {self._cache_id}")
+        except Exception as e:
+            logger.warning(f"Impossible de créer le cache (utilisation sans cache): {e}")
+            self._cached_content = None
+            self._cache_id = None
+
+    async def load_embedding_model(self) -> None:
+        """Charge explicitement le modèle d'embedding (préchargement)."""
         if self._embedding_model is None:
+            logger.info("Chargement du modèle d'embedding...")
             self._embedding_model = await asyncio.to_thread(
                 SentenceTransformer, settings.EMBEDDING_MODEL
             )
+            logger.info("Modèle d'embedding chargé avec succès.")
+
+    async def _get_embedding_model(self) -> SentenceTransformer:
+        """Retourne le modèle d'embedding (chargé si nécessaire)."""
+        if self._embedding_model is None:
+            await self.load_embedding_model()
         return self._embedding_model
+
+    def _get_model(self):
+        """Retourne le modèle Gemini avec ou sans cache."""
+        if self._cache_id:
+            return genai.GenerativeModel(
+                model_name=settings.GEMINI_MODEL,
+                cached_content=self._cache_id
+            )
+        else:
+            return genai.GenerativeModel(
+                model_name=settings.GEMINI_MODEL,
+                system_instruction=self._system_prompt
+            )
 
     # ------------------------------------------------------------------
     # Public methods
@@ -52,7 +98,6 @@ class LLMEngine:
         context: str = "",
         history: Optional[List[Dict[str, str]]] = None,
     ) -> str:
-        """Non‑streaming answer generation."""
         try:
             await rate_limiter.acquire()
 
@@ -60,23 +105,29 @@ class LLMEngine:
             if not await token_counter.can_add(estimated_tokens):
                 return self._get_quota_exceeded_response()
 
-            system_content = self._build_system_content(context)
-            messages = [
-                {"role": "system", "content": system_content},
-                *self._history_to_messages(history),
-                {"role": "user", "content": question},
-            ]
+            user_prompt = ""
+            if context:
+                user_prompt += f"CONTEXTE DOCUMENTAIRE:\n{context}\n\n"
+            if history:
+                history_text = "\n".join(
+                    [f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[-settings.MEMORY_LIMIT:]]
+                )
+                user_prompt += f"Historique:\n{history_text}\n\n"
+            user_prompt += f"Question: {question}"
 
-            response = await self.client.chat.completions.create(
-                model=settings.MODEL_NAME,
-                messages=messages,
-                temperature=settings.TEMPERATURE,
-                max_tokens=settings.MAX_TOKENS,
+            model = self._get_model()
+            response = await asyncio.to_thread(
+                model.generate_content,
+                user_prompt,
+                generation_config={
+                    "temperature": settings.TEMPERATURE,
+                    "max_output_tokens": settings.MAX_TOKENS,
+                }
             )
 
-            answer = response.choices[0].message.content
-            if hasattr(response, "usage") and response.usage:
-                await token_counter.add(response.usage.total_tokens)
+            answer = response.text
+            token_est = len(answer) // 4 + len(user_prompt) // 4
+            await token_counter.add(token_est)
 
             answer = self._enhance_markdown_formatting(answer)
             answer = self._check_response_coherence(answer, question)
@@ -85,12 +136,6 @@ class LLMEngine:
         except RateLimitExceeded as e:
             logger.warning("Rate limit exceeded", extra={"wait": e.wait_time})
             return self._get_rate_limit_response(e.wait_time)
-        except groq.APITimeoutError:
-            logger.error("Groq API timeout")
-            return self._get_timeout_response()
-        except groq.APIConnectionError:
-            logger.error("Groq network error")
-            return self._get_network_error_response()
         except Exception as e:
             logger.exception("Unexpected error in LLMEngine.ask")
             return self._create_empty_response()
@@ -101,7 +146,6 @@ class LLMEngine:
         context: str = "",
         history: Optional[List[Dict[str, str]]] = None,
     ) -> AsyncGenerator[str, None]:
-        """Streaming answer generation, yields tokens one by one."""
         try:
             await rate_limiter.acquire()
 
@@ -110,43 +154,40 @@ class LLMEngine:
                 yield self._get_quota_exceeded_response()
                 return
 
-            system_content = self._build_system_content(context)
-            messages = [
-                {"role": "system", "content": system_content},
-                *self._history_to_messages(history),
-                {"role": "user", "content": question},
-            ]
+            user_prompt = ""
+            if context:
+                user_prompt += f"CONTEXTE DOCUMENTAIRE:\n{context}\n\n"
+            if history:
+                history_text = "\n".join(
+                    [f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[-settings.MEMORY_LIMIT:]]
+                )
+                user_prompt += f"Historique:\n{history_text}\n\n"
+            user_prompt += f"Question: {question}"
 
-            # Note: 'stream_options' parameter may not be supported in the current Groq client
-            stream = await self.client.chat.completions.create(
-                model=settings.MODEL_NAME,
-                messages=messages,
-                temperature=settings.TEMPERATURE,
-                max_tokens=settings.MAX_TOKENS,
+            model = self._get_model()
+            response = await asyncio.to_thread(
+                model.generate_content,
+                user_prompt,
+                generation_config={
+                    "temperature": settings.TEMPERATURE,
+                    "max_output_tokens": settings.MAX_TOKENS,
+                },
                 stream=True,
             )
 
-            usage = None
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    token = chunk.choices[0].delta.content
+            full_text = ""
+            for chunk in response:
+                if chunk.text:
+                    token = chunk.text
+                    full_text += token
                     yield token
-                # Usage may be available in a final chunk if the API includes it
-                if hasattr(chunk, "usage") and chunk.usage:
-                    usage = chunk.usage
 
-            if usage and usage.total_tokens:
-                await token_counter.add(usage.total_tokens)
+            token_est = len(full_text) // 4 + len(user_prompt) // 4
+            await token_counter.add(token_est)
 
         except RateLimitExceeded as e:
             logger.warning("Rate limit exceeded during stream")
             yield self._get_rate_limit_response(e.wait_time)
-        except groq.APITimeoutError:
-            logger.error("Groq API timeout during stream")
-            yield self._get_timeout_response()
-        except groq.APIConnectionError:
-            logger.error("Groq network error during stream")
-            yield self._get_network_error_response()
         except asyncio.CancelledError:
             logger.debug("Stream cancelled by client")
             raise
@@ -155,9 +196,8 @@ class LLMEngine:
             yield self._create_empty_response()
 
     # ------------------------------------------------------------------
-    # Hybrid search & reranking (production‑ready)
+    # Hybrid search & reranking (inchangé)
     # ------------------------------------------------------------------
-
     async def hybrid_search(
         self,
         query: str,
@@ -165,39 +205,27 @@ class LLMEngine:
         alpha: float = 0.5,
         mmr_lambda: float = 0.5,
     ) -> List[Dict[str, Any]]:
-        """
-        Perform hybrid search: vector + BM25, then rerank with composite score,
-        apply MMR for diversity using real embeddings.
-        Returns a list of documents with scores.
-        """
         candidate_k = k * 2
         vector_docs = await self.vector_store.similarity_search(query, k=candidate_k)
-
         if not vector_docs:
             return []
 
         corpus = [doc.page_content for doc in vector_docs]
         bm25 = BM25Okapi([text.split() for text in corpus])
-
         query_tokens = query.split()
         bm25_scores = bm25.get_scores(query_tokens)
         max_bm25 = max(bm25_scores) if bm25_scores else 1.0
         bm25_scores = [s / max_bm25 for s in bm25_scores]
-
         vector_scores = [doc.metadata.get("score", 0.0) for doc in vector_docs]
-
-        composite_scores = []
-        for i in range(len(vector_docs)):
-            composite = alpha * vector_scores[i] + (1 - alpha) * bm25_scores[i]
-            composite_scores.append(composite)
-
+        composite_scores = [
+            alpha * vector_scores[i] + (1 - alpha) * bm25_scores[i]
+            for i in range(len(vector_docs))
+        ]
         docs_with_scores = [
             {"document": doc, "score": composite_scores[i]}
             for i, doc in enumerate(vector_docs)
         ]
-
         docs_with_scores.sort(key=lambda x: x["score"], reverse=True)
-
         selected = await self._mmr_select(docs_with_scores, k, mmr_lambda)
         return selected
 
@@ -207,32 +235,20 @@ class LLMEngine:
         k: int,
         lambda_: float = 0.5,
     ) -> List[Dict[str, Any]]:
-        """
-        Maximal Marginal Relevance selection using cosine similarity of real embeddings.
-        """
         if len(docs_with_scores) <= k:
             return docs_with_scores[:k]
-
-        # Ensure embedding model is loaded
         model = await self._get_embedding_model()
-
-        # Compute embeddings for all documents
         texts = [d["document"].page_content for d in docs_with_scores]
-        # Run embedding in thread pool to avoid blocking
         embeddings = await asyncio.to_thread(model.encode, texts, convert_to_tensor=False)
-        # embeddings is a numpy array of shape (n, dim)
-        # Normalize embeddings for cosine similarity (dot product of normalized vectors)
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms[norms == 0] = 1  # avoid division by zero
+        norms[norms == 0] = 1
         embeddings_norm = embeddings / norms
 
-        # Function to compute cosine similarity between two documents by index
         def cosine_sim(i: int, j: int) -> float:
             return float(np.dot(embeddings_norm[i], embeddings_norm[j]))
 
         selected_indices = []
         remaining_indices = list(range(len(docs_with_scores)))
-
         while len(selected_indices) < k and remaining_indices:
             mmr_scores = []
             for i in remaining_indices:
@@ -243,17 +259,14 @@ class LLMEngine:
                     max_sim = 0.0
                 mmr = lambda_ * relevance - (1 - lambda_) * max_sim
                 mmr_scores.append((i, mmr))
-            # Select best
             best_idx, _ = max(mmr_scores, key=lambda x: x[1])
             selected_indices.append(best_idx)
             remaining_indices.remove(best_idx)
-
         return [docs_with_scores[i] for i in selected_indices]
 
     # ------------------------------------------------------------------
-    # Fallback responses
+    # Fallback responses & utilities (inchangés)
     # ------------------------------------------------------------------
-
     def _get_timeout_response(self) -> str:
         return "⏳ Oups, la réponse a pris trop de temps... Peux-tu reformuler ou réessayer ?"
 
@@ -269,27 +282,7 @@ class LLMEngine:
     def _create_empty_response(self) -> str:
         return "🤔 Je n'ai pas reçu de message valide. Peux‑tu préciser ta demande ?"
 
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-
-    def _build_system_content(self, context: str) -> str:
-        """Build the system message content, including RAG context if any."""
-        base = prompt_manager.get_system_prompt()
-        if context:
-            base += f"\n\nCONTEXTE DOCUMENTAIRE:\n{context}"
-        return base
-
-    def _history_to_messages(self, history: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
-        """Convert conversation history to OpenAI message format."""
-        if not history:
-            return []
-        # Limit to last N messages (configured in settings)
-        limited = history[-settings.MEMORY_LIMIT:]
-        return [{"role": msg["role"], "content": msg["content"]} for msg in limited]
-
     def _enhance_markdown_formatting(self, text: str) -> str:
-        # Convert asterisk lists to bullet points for better markdown
         text = re.sub(r"^\s*\*\s", "• ", text, flags=re.MULTILINE)
         return text
 
@@ -298,12 +291,7 @@ class LLMEngine:
             answer += "\n\n💡 Désolé, ma réponse est courte. Souhaites‑tu plus de détails ?"
         return answer
 
-    def _calculate_composite_score(
-        self,
-        vector_score: float,
-        bm25_score: float,
-        alpha: float = 0.5,
-    ) -> float:
+    def _calculate_composite_score(self, vector_score: float, bm25_score: float, alpha: float = 0.5) -> float:
         return alpha * vector_score + (1 - alpha) * bm25_score
 
     def _advanced_tokenization(self, text: str) -> int:

@@ -2,9 +2,8 @@
 """
 Script interactif de test complet du backend ChatISP AI.
 Authentification JWT, gestion des conversations (CRUD), chat en streaming.
-Avec rendu Markdown via Rich (affichage formaté après streaming).
-Ajout de la gestion d'épinglage (/pin) et améliorations professionnelles.
-Version premium : export, recherche, statistiques, reconnexion auto.
+Version sans rendu Markdown (texte brut).
+Timeout porté à 5 minutes.
 """
 
 import argparse
@@ -21,7 +20,6 @@ from typing import Optional, List, Dict, Any
 import httpx
 from dotenv import load_dotenv
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.table import Table
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -41,8 +39,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://localhost:8000"
-TIMEOUT = 30.0
+# === MODIFICATION : URL HTTPS du backend distant ===
+BASE_URL = "http://localhost:8000/api/v1"
+# === MODIFICATION : Timeout à 5 minutes (300 secondes) ===
+TIMEOUT = 300.0  # 5 minutes
 
 console = Console()
 
@@ -290,7 +290,7 @@ class ChatISPClient:
     async def send_message_stream(self, conv_id: str, content: str) -> str:
         """
         Envoie un message et reçoit la réponse en streaming.
-        Retourne la réponse complète (pour affichage Markdown final).
+        Retourne la réponse complète (texte brut).
         """
         if not self._client:
             raise RuntimeError("Client non initialisé")
@@ -306,7 +306,7 @@ class ChatISPClient:
             ) as response:
                 if response.status_code != 200:
                     raise APIError(f"Erreur HTTP {response.status_code}")
-                console.print("\n🤖 Réponse (streaming) : ", end="", style="bold green")
+                console.print("\n🤖 Réponse : ", end="", style="bold green")
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -372,7 +372,8 @@ class InteractiveChat:
             role = "🧑‍💻 Utilisateur" if msg.role == "user" else "🤖 Assistant"
             if msg.role == "assistant":
                 console.print(f"[bold]{role}:[/]")
-                console.print(Markdown(msg.content))
+                # Affichage en texte brut (pas de Markdown)
+                console.print(msg.content)
             else:
                 content = msg.content.replace("\n", " ")
                 console.print(f"[bold]{role}:[/] {content[:200]}{'…' if len(content) > 200 else ''}")
@@ -599,8 +600,9 @@ class InteractiveChat:
                     self.stats.total_response_time += elapsed
                     self.stats.messages_received += 1
                     if full_response:
-                        console.print("\n[bold green]📝 Réponse formatée :[/]")
-                        console.print(Markdown(full_response))
+                        # Affichage en texte brut (pas de Markdown)
+                        console.print("\n[bold green]📝 Réponse :[/]")
+                        console.print(full_response)
                         console.print()
                 except APIError as e:
                     console.print(f"\n[red]❌ {e}[/]")
@@ -621,7 +623,7 @@ class InteractiveChat:
 # ----------------------------------------------------------------------
 async def main():
     parser = argparse.ArgumentParser(description="Test interactif du backend ChatISP AI")
-    parser.add_argument("--url", default="http://localhost:8000", help="URL du backend")
+    parser.add_argument("--url", default=BASE_URL, help="URL du backend")
     parser.add_argument("--debug", action="store_true", help="Activer les logs de debug")
     args = parser.parse_args()
 

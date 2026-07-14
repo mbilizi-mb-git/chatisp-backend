@@ -28,7 +28,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://chatisp_user:change_me@db:5432/chatisp_db
+      - DATABASE_URL=postgresql+asyncpg://chatisp_user:DEMBI2006@db:5432/chatisp_db
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GEMINI_MODEL=${GEMINI_MODEL}
       - GEMINI_CACHE_TTL=${GEMINI_CACHE_TTL}

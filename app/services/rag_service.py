@@ -1,6 +1,6 @@
 """
 Service RAG orchestre la recherche vectorielle, l'appel au LLM, la gestion des messages
-et la génération automatique des titres de conversation (LLM + fallback heuristique).
+et la génération automatique des titres de conversation (UNIQUEMENT heuristique, pas de LLM).
 """
 
 import asyncio
@@ -16,7 +16,7 @@ from app.services.conversation_service import ConversationService
 from app.services.message_service import MessageService
 from app.rag.llm_engine import LLMEngine
 from app.rag.vector_store import VectorStore
-from app.utils.title_generator import generate_title_heuristic, generate_title_with_llm
+from app.utils.title_generator import generate_title_heuristic  # plus de LLM
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -46,9 +46,8 @@ class RagService:
         """
         Traite un message utilisateur et génère une réponse en streaming.
         Sauvegarde automatiquement les messages et, si c'est le premier message,
-        génère un titre intelligent pour la conversation.
+        génère un titre intelligent (heuristique uniquement).
         """
-        # Créer les services avec la session fournie
         msg_service = MessageService(db)
         conv_service = ConversationService(db)
 
@@ -116,14 +115,15 @@ class RagService:
             except Exception as e:
                 logger.error(f"Échec de la sauvegarde du message assistant: {e}")
 
-            # 7. Si premier message, générer un titre intelligent
+            # 7. Si premier message, générer un titre (UNIQUEMENT heuristique)
             if is_first and assistant_content:
-                title = await self._generate_conversation_title(user_message)
-                if title:
+                # Utiliser uniquement l'heuristique, pas le LLM
+                title = self._generate_title_heuristic_only(user_message)
+                if title and title != "Conversation":
                     try:
                         await conv_service.rename_conversation(conversation_id, title)
                         logger.info(
-                            "Titre généré automatiquement",
+                            "Titre généré automatiquement (heuristique)",
                             extra={"conv_id": conversation_id, "title": title},
                         )
                     except Exception as e:
@@ -138,10 +138,6 @@ class RagService:
             await self._touch_conversation(conversation_id, db)
 
     async def vector_search(self, query: str, k: int = 5) -> str:
-        """
-        Recherche les documents pertinents dans la base vectorielle.
-        Retourne une chaîne de texte concaténée ou une chaîne vide.
-        """
         try:
             docs = await self.vector_store.similarity_search(query, k=k)
             if not docs:
@@ -152,37 +148,22 @@ class RagService:
             return ""
 
     async def _is_first_message(self, conversation_id: str, msg_service: MessageService) -> bool:
-        """Détermine si le message actuel est le premier de la conversation."""
         messages = await msg_service.get_last_messages(conversation_id, limit=2)
         return len(messages) == 1
 
-    async def _generate_conversation_title(self, user_message: str) -> Optional[str]:
-        """
-        Génère un titre pour une nouvelle conversation.
-        Essaie d'abord le LLM, puis l'heuristique en fallback.
-        """
-        title = await generate_title_with_llm(user_message)
-        if title:
-            logger.debug(f"Titre généré par LLM: {title}")
-            return title
-
+    def _generate_title_heuristic_only(self, user_message: str) -> Optional[str]:
+        """Génère un titre via l'heuristique (sans LLM)."""
         title = generate_title_heuristic(user_message)
         if title and title != "Conversation":
-            logger.debug(f"Titre généré par heuristique: {title}")
             return title
-
         if len(user_message.strip()) > 0:
             first_words = " ".join(user_message.split()[:5])
             if len(first_words) > 40:
                 first_words = first_words[:37] + "..."
-            title = first_words if first_words else "Nouvelle conversation"
-            logger.debug(f"Titre par défaut: {title}")
-            return title
-
+            return first_words if first_words else "Nouvelle conversation"
         return None
 
     async def _touch_conversation(self, conversation_id: str, db: AsyncSession) -> None:
-        """Met à jour le champ updated_at de la conversation."""
         stmt = (
             update(Conversation)
             .where(Conversation.id == conversation_id)

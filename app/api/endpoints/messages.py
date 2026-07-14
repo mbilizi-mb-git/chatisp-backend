@@ -46,11 +46,10 @@ async def chat_stream(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            # Injecter la session DB dans le service RAG (car il a été créé sans DB)
-            rag.db = db
             async for token in rag.process_message_stream(
                 conversation_id=body.conversation_id,
                 user_message=body.content,
+                db=db,  # <-- PASSER LA SESSION EXPLICITEMENT
             ):
                 if await request.is_disconnected():
                     logger.debug("Client déconnecté, arrêt du stream")
@@ -148,10 +147,10 @@ async def regenerate_response(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            rag.db = db
             async for token in rag.process_message_stream(
                 conversation_id=conversation_id,
                 user_message=user_msg_content,
+                db=db,  # <-- PASSER LA SESSION EXPLICITEMENT
             ):
                 if await request.is_disconnected():
                     break

@@ -35,9 +35,8 @@ class LLMEngine:
         self._embedding_model = None
         self._system_prompt = prompt_manager.get_system_prompt()
 
-        # Modèle par défaut (on va essayer plusieurs variantes)
+        # Modèle par défaut
         self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash")
-        # Si le modèle est gemini-2.5-flash, on le corrige
         if self.model_name == "gemini-2.5-flash":
             self.model_name = "gemini-1.5-flash"
             logger.warning("Modèle gemini-2.5-flash non disponible, utilisation de gemini-1.5-flash")
@@ -63,19 +62,15 @@ class LLMEngine:
             await self.load_embedding_model()
         return self._embedding_model
 
-    def _get_model(self, model_name: str):
-        """Retourne un modèle Gemini avec system_instruction."""
-        return genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=self._system_prompt
-        )
-
-    async def _generate_with_fallback(self, user_prompt: str, stream: bool = False):
-        """Essaie plusieurs modèles en cas d'échec."""
+    def _generate_with_fallback(self, user_prompt: str, stream: bool = False):
+        """Méthode synchrone qui essaie plusieurs modèles Gemini en cas d'échec."""
         last_error = None
         for model_name in self.fallback_models:
             try:
-                model = self._get_model(model_name)
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=self._system_prompt
+                )
                 if stream:
                     return model.generate_content(
                         user_prompt,
@@ -119,7 +114,7 @@ class LLMEngine:
             user_prompt = self._build_user_prompt(question, context, history)
 
             response = await asyncio.to_thread(
-                self._generate_with_fallback, user_prompt, stream=False
+                self._generate_with_fallback, user_prompt, False
             )
 
             answer = response.text
@@ -153,8 +148,9 @@ class LLMEngine:
 
             user_prompt = self._build_user_prompt(question, context, history)
 
+            # Appel synchrone dans un thread pour le streaming
             response = await asyncio.to_thread(
-                self._generate_with_fallback, user_prompt, stream=True
+                self._generate_with_fallback, user_prompt, True
             )
 
             full_text = ""

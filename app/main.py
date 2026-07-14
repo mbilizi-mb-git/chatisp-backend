@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Base de données initialisée")
 
-    # Préchargement du vector store (modèle d'embedding)
+    # Préchargement du vector store
     vector_store = None
     try:
         vector_store = VectorStore()
@@ -40,24 +40,24 @@ async def lifespan(app: FastAPI):
         logger.error(f"Échec du préchargement du vector store: {e}")
         logger.info("Le vector store sera chargé à la première utilisation (lazy loading)")
 
-    # Préchargement du LLMEngine (cache Gemini + embedding model)
+    # Préchargement du LLMEngine
     if vector_store:
         try:
             llm_engine = LLMEngine(vector_store)
-            # Charger le modèle d'embedding explicitement
             await llm_engine.load_embedding_model()
             logger.info("LLMEngine préchargé avec succès")
-            # Créer le service RAG avec les instances préchargées
+            # Créer RagService SANS db (sera passé à chaque appel)
             rag_service = RagService(
-                db=None,  # sera passé dans les endpoints
                 vector_store=vector_store,
-                llm_engine=llm_engine
+                llm_engine=llm_engine,
             )
-            set_rag_service(rag_service)  # Stocker dans le singleton
+            set_rag_service(rag_service)  # Singleton global
             logger.info("RagService initialisé avec succès")
         except Exception as e:
             logger.error(f"Échec du préchargement du LLMEngine: {e}")
             set_rag_service(None)
+    else:
+        set_rag_service(None)
 
     yield
 

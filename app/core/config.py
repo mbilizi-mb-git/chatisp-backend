@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # Google Gemini
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-1.5-flash"   # Modèle stable
-    GEMINI_CACHE_TTL: int = 86400             # 24 heures
+    GEMINI_CACHE_TTL: int = 86400             # 24 heures (non utilisé si cache désactivé)
 
     # RAG & Embeddings
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"

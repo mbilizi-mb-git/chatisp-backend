@@ -33,39 +33,24 @@ class LLMEngine:
         self.vector_store = vector_store
         genai.configure(api_key=settings.GEMINI_API_KEY)
         self._embedding_model = None
-        self._cached_content = None
-        self._cache_id = None
         self._system_prompt = prompt_manager.get_system_prompt()
 
-        # Modèle par défaut valide (remplace gemini-2.5-flash)
+        # Modèle par défaut (on va essayer plusieurs variantes)
         self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash")
-        # Si la variable est 'gemini-2.5-flash', on la corrige
+        # Si le modèle est gemini-2.5-flash, on le corrige
         if self.model_name == "gemini-2.5-flash":
             self.model_name = "gemini-1.5-flash"
             logger.warning("Modèle gemini-2.5-flash non disponible, utilisation de gemini-1.5-flash")
 
-        # Créer le cache au démarrage (si supporté)
-        self._create_cache()
-
-    def _create_cache(self) -> None:
-        """Crée un cache contextuel pour le prompt système (préchargement)."""
-        try:
-            logger.info("Création du cache contextuel Gemini...")
-            self._cached_content = genai.caching.CachedContent.create(
-                model=self.model_name,
-                display_name="chatisp_system_prompt",
-                system_instruction=self._system_prompt,
-                ttl=settings.GEMINI_CACHE_TTL,
-            )
-            self._cache_id = self._cached_content.name
-            logger.info(f"Cache créé avec succès, ID: {self._cache_id}")
-        except Exception as e:
-            logger.warning(f"Impossible de créer le cache (utilisation sans cache): {e}")
-            self._cached_content = None
-            self._cache_id = None
+        # Liste de modèles de fallback (ordre de préférence)
+        self.fallback_models = [
+            self.model_name,
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+            "gemini-pro",
+        ]
 
     async def load_embedding_model(self) -> None:
-        """Charge explicitement le modèle d'embedding (préchargement)."""
         if self._embedding_model is None:
             logger.info("Chargement du modèle d'embedding...")
             self._embedding_model = await asyncio.to_thread(
@@ -78,28 +63,41 @@ class LLMEngine:
             await self.load_embedding_model()
         return self._embedding_model
 
-    def _get_model(self):
-        """Retourne le modèle Gemini avec ou sans cache."""
-        if self._cache_id:
+    def _get_model(self, model_name: str):
+        """Retourne un modèle Gemini avec system_instruction."""
+        return genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=self._system_prompt
+        )
+
+    async def _generate_with_fallback(self, user_prompt: str, stream: bool = False):
+        """Essaie plusieurs modèles en cas d'échec."""
+        last_error = None
+        for model_name in self.fallback_models:
             try:
-                # Méthode recommandée : passer cached_content comme argument
-                # La plupart des versions récentes supportent cached_content
-                return genai.GenerativeModel(
-                    model_name=self.model_name,
-                    cached_content=self._cache_id
-                )
-            except TypeError:
-                # Fallback pour les versions plus anciennes
-                logger.warning("cached_content not supported, using system_instruction fallback")
-                return genai.GenerativeModel(
-                    model_name=self.model_name,
-                    system_instruction=self._system_prompt
-                )
-        else:
-            return genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=self._system_prompt
-            )
+                model = self._get_model(model_name)
+                if stream:
+                    return model.generate_content(
+                        user_prompt,
+                        generation_config={
+                            "temperature": settings.TEMPERATURE,
+                            "max_output_tokens": settings.MAX_TOKENS,
+                        },
+                        stream=True
+                    )
+                else:
+                    return model.generate_content(
+                        user_prompt,
+                        generation_config={
+                            "temperature": settings.TEMPERATURE,
+                            "max_output_tokens": settings.MAX_TOKENS,
+                        }
+                    )
+            except Exception as e:
+                logger.warning(f"Modèle {model_name} échoué: {e}")
+                last_error = e
+                continue
+        raise last_error
 
     # ------------------------------------------------------------------
     # Public methods
@@ -120,14 +118,8 @@ class LLMEngine:
 
             user_prompt = self._build_user_prompt(question, context, history)
 
-            model = self._get_model()
             response = await asyncio.to_thread(
-                model.generate_content,
-                user_prompt,
-                generation_config={
-                    "temperature": settings.TEMPERATURE,
-                    "max_output_tokens": settings.MAX_TOKENS,
-                }
+                self._generate_with_fallback, user_prompt, stream=False
             )
 
             answer = response.text
@@ -161,15 +153,8 @@ class LLMEngine:
 
             user_prompt = self._build_user_prompt(question, context, history)
 
-            model = self._get_model()
             response = await asyncio.to_thread(
-                model.generate_content,
-                user_prompt,
-                generation_config={
-                    "temperature": settings.TEMPERATURE,
-                    "max_output_tokens": settings.MAX_TOKENS,
-                },
-                stream=True,
+                self._generate_with_fallback, user_prompt, stream=True
             )
 
             full_text = ""
@@ -197,7 +182,6 @@ class LLMEngine:
     # ------------------------------------------------------------------
 
     def _build_user_prompt(self, question: str, context: str = "", history: Optional[List[Dict[str, str]]] = None) -> str:
-        """Construit le prompt utilisateur sans le système."""
         parts = []
         if context:
             parts.append(f"CONTEXTE DOCUMENTAIRE:\n{context}")

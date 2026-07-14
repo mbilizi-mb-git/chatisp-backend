@@ -25,7 +25,6 @@ class Settings(BaseSettings):
     # Base de données (PostgreSQL recommandé en production)
     DATABASE_URL: str = "postgresql+asyncpg://chatisp_user:change_me@localhost:5432/chatisp_db"
 
-    # Pour faciliter le déploiement, on peut aussi décomposer (optionnel)
     POSTGRES_USER: str = "chatisp_user"
     POSTGRES_PASSWORD: str = "change_me"
     POSTGRES_HOST: str = "localhost"
@@ -40,6 +39,11 @@ class Settings(BaseSettings):
 
     # Google OAuth2
     GOOGLE_CLIENT_ID: str = ""
+
+    # Google Gemini
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-1.5-flash"   # Modèle stable
+    GEMINI_CACHE_TTL: int = 86400             # 24 heures
 
     # RAG & Embeddings
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
@@ -59,32 +63,24 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "*"
 
-    # Groq LLM (optionnel, conservé pour fallback ou pour les utilisateurs qui veulent garder les deux)
-    GROQ_API_KEY: str = ""  # vide par défaut pour éviter les erreurs si non définie
+    # Groq (conservé pour compatibilité)
+    GROQ_API_KEY: str = ""
     MODEL_NAME: str = "mixtral-8x7b-32768"
     TEMPERATURE: float = 0.7
-    MAX_TOKENS: int = 1000000
+    MAX_TOKENS: int = 4096
     GROQ_RATE_LIMIT_MAX_CALLS: int = 30
     GROQ_RATE_LIMIT_PERIOD: int = 60
     GROQ_RATE_LIMIT_MAX_WAIT: int = 10
     GROQ_DAILY_TOKEN_QUOTA: int = 1_000_000
 
-    # Google Gemini
-    GEMINI_API_KEY: str = ""   # à remplir dans .env
-    GEMINI_MODEL: str = "gemini-2.5-flash"
-    GEMINI_CACHE_TTL: int = 86400  # Durée de vie du cache en secondes (1 J )
-
     @property
     def cors_origins_list(self) -> List[str]:
-        """Retourne la liste des origines autorisées pour CORS."""
         if self.CORS_ORIGINS == "*":
             return ["*"]
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 
     @property
     def database_url(self) -> str:
-        """Retourne l'URL de connexion à la base de données,
-        en priorité depuis DATABASE_URL, sinon construite depuis les composants."""
         if self.DATABASE_URL:
             return self.DATABASE_URL
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
@@ -99,5 +95,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Retourne une instance unique (cachée) des paramètres."""
     return Settings()

@@ -27,7 +27,7 @@ token_counter = TokenCounter(daily_quota=settings.GROQ_DAILY_TOKEN_QUOTA)
 
 
 class LLMEngine:
-    """Advanced RAG engine with hybrid search, reranking, and streaming using Google Gemini with Context Caching."""
+    """Advanced RAG engine with hybrid search, reranking, and streaming using Google Gemini."""
 
     def __init__(self, vector_store: VectorStore):
         self.vector_store = vector_store
@@ -37,18 +37,22 @@ class LLMEngine:
         self._cache_id = None
         self._system_prompt = prompt_manager.get_system_prompt()
 
-        # Créer le cache au démarrage (préchargement)
-        self._create_cache()
+        # Modèle par défaut valide (remplace gemini-2.5-flash)
+        self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash")
+        # Si la variable est 'gemini-2.5-flash', on la corrige
+        if self.model_name == "gemini-2.5-flash":
+            self.model_name = "gemini-1.5-flash"
+            logger.warning("Modèle gemini-2.5-flash non disponible, utilisation de gemini-1.5-flash")
 
-        # Le modèle d'embedding sera chargé explicitement plus tard via load_embedding_model()
-        # pour ne pas bloquer le démarrage.
+        # Créer le cache au démarrage (si supporté)
+        self._create_cache()
 
     def _create_cache(self) -> None:
         """Crée un cache contextuel pour le prompt système (préchargement)."""
         try:
             logger.info("Création du cache contextuel Gemini...")
             self._cached_content = genai.caching.CachedContent.create(
-                model=settings.GEMINI_MODEL,
+                model=self.model_name,
                 display_name="chatisp_system_prompt",
                 system_instruction=self._system_prompt,
                 ttl=settings.GEMINI_CACHE_TTL,
@@ -70,7 +74,6 @@ class LLMEngine:
             logger.info("Modèle d'embedding chargé avec succès.")
 
     async def _get_embedding_model(self) -> SentenceTransformer:
-        """Retourne le modèle d'embedding (chargé si nécessaire)."""
         if self._embedding_model is None:
             await self.load_embedding_model()
         return self._embedding_model
@@ -78,13 +81,23 @@ class LLMEngine:
     def _get_model(self):
         """Retourne le modèle Gemini avec ou sans cache."""
         if self._cache_id:
-            return genai.GenerativeModel(
-                model_name=settings.GEMINI_MODEL,
-                cached_content=self._cache_id
-            )
+            try:
+                # Méthode recommandée : passer cached_content comme argument
+                # La plupart des versions récentes supportent cached_content
+                return genai.GenerativeModel(
+                    model_name=self.model_name,
+                    cached_content=self._cache_id
+                )
+            except TypeError:
+                # Fallback pour les versions plus anciennes
+                logger.warning("cached_content not supported, using system_instruction fallback")
+                return genai.GenerativeModel(
+                    model_name=self.model_name,
+                    system_instruction=self._system_prompt
+                )
         else:
             return genai.GenerativeModel(
-                model_name=settings.GEMINI_MODEL,
+                model_name=self.model_name,
                 system_instruction=self._system_prompt
             )
 
@@ -105,15 +118,7 @@ class LLMEngine:
             if not await token_counter.can_add(estimated_tokens):
                 return self._get_quota_exceeded_response()
 
-            user_prompt = ""
-            if context:
-                user_prompt += f"CONTEXTE DOCUMENTAIRE:\n{context}\n\n"
-            if history:
-                history_text = "\n".join(
-                    [f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[-settings.MEMORY_LIMIT:]]
-                )
-                user_prompt += f"Historique:\n{history_text}\n\n"
-            user_prompt += f"Question: {question}"
+            user_prompt = self._build_user_prompt(question, context, history)
 
             model = self._get_model()
             response = await asyncio.to_thread(
@@ -154,15 +159,7 @@ class LLMEngine:
                 yield self._get_quota_exceeded_response()
                 return
 
-            user_prompt = ""
-            if context:
-                user_prompt += f"CONTEXTE DOCUMENTAIRE:\n{context}\n\n"
-            if history:
-                history_text = "\n".join(
-                    [f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[-settings.MEMORY_LIMIT:]]
-                )
-                user_prompt += f"Historique:\n{history_text}\n\n"
-            user_prompt += f"Question: {question}"
+            user_prompt = self._build_user_prompt(question, context, history)
 
             model = self._get_model()
             response = await asyncio.to_thread(
@@ -194,6 +191,23 @@ class LLMEngine:
         except Exception as e:
             logger.exception("Unexpected error in streaming")
             yield self._create_empty_response()
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    def _build_user_prompt(self, question: str, context: str = "", history: Optional[List[Dict[str, str]]] = None) -> str:
+        """Construit le prompt utilisateur sans le système."""
+        parts = []
+        if context:
+            parts.append(f"CONTEXTE DOCUMENTAIRE:\n{context}")
+        if history:
+            history_text = "\n".join(
+                [f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[-settings.MEMORY_LIMIT:]]
+            )
+            parts.append(f"Historique:\n{history_text}")
+        parts.append(f"Question: {question}")
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Hybrid search & reranking (inchangé)

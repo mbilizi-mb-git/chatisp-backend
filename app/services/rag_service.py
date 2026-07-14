@@ -44,9 +44,9 @@ class RagService:
         self.llm = llm_engine
         # Les services métier seront créés à chaque requête avec la session active
         # pour éviter les problèmes de session périmée.
-        # On garde les références pour la compatibilité, mais on les réinitialise.
-        self.conv_service = ConversationService(db) if db else None
-        self.msg_service = MessageService(db) if db else None
+        # On les initialise à None, ils seront recréés dans process_message_stream.
+        self.conv_service = None
+        self.msg_service = None
 
     async def process_message_stream(
         self,
@@ -165,6 +165,7 @@ class RagService:
             docs = await self.vector_store.similarity_search(query, k=k)
             if not docs:
                 return ""
+            # Concaténer les extraits avec un séparateur
             return "\n\n---\n\n".join([doc.page_content for doc in docs])
         except Exception as e:
             logger.error(f"Erreur lors de la recherche vectorielle: {e}")
@@ -173,6 +174,7 @@ class RagService:
     async def _is_first_message(self, conversation_id: str, msg_service: MessageService) -> bool:
         """Détermine si le message actuel est le premier de la conversation."""
         messages = await msg_service.get_last_messages(conversation_id, limit=2)
+        # Un seul message = c'est le premier (le message utilisateur vient d'être ajouté)
         return len(messages) == 1
 
     async def _generate_conversation_title(self, user_message: str) -> Optional[str]:
@@ -181,17 +183,21 @@ class RagService:
         Essaie d'abord le LLM, puis l'heuristique en fallback.
         Retourne None si aucun titre n'est généré.
         """
+        # Tentative LLM
         title = await generate_title_with_llm(user_message)
         if title:
             logger.debug(f"Titre généré par LLM: {title}")
             return title
 
+        # Fallback heuristique
         title = generate_title_heuristic(user_message)
         if title and title != "Conversation":
             logger.debug(f"Titre généré par heuristique: {title}")
             return title
 
+        # Dernier recours : éviter de laisser le titre nul
         if len(user_message.strip()) > 0:
+            # Extraire les premiers mots
             first_words = " ".join(user_message.split()[:5])
             if len(first_words) > 40:
                 first_words = first_words[:37] + "..."

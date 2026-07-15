@@ -29,7 +29,7 @@ token_counter = TokenCounter(daily_quota=settings.GROQ_DAILY_TOKEN_QUOTA)
 class LLMEngine:
     """Advanced RAG engine with hybrid search, reranking, and streaming using Google Gemini."""
 
-    # Modèles à essayer (par ordre de préférence)
+    # Liste des modèles à essayer (par ordre de préférence)
     MODEL_CANDIDATES = [
         "gemini-2.0-flash-exp",
         "gemini-1.5-pro",
@@ -45,7 +45,7 @@ class LLMEngine:
         self._cache_id = None
         self._system_prompt = prompt_manager.get_system_prompt()
 
-        # Sélectionner un modèle valide
+        # Sélection du modèle (priorité: .env -> détection automatique)
         self.model_name = self._select_valid_model()
         logger.info(f"✅ Utilisation du modèle Gemini: {self.model_name}")
 
@@ -53,30 +53,41 @@ class LLMEngine:
         self._create_cache()
 
     def _select_valid_model(self) -> str:
-        """Trouve le premier modèle disponible parmi les candidats."""
-        # D'abord, essayer le modèle configuré
+        """Sélectionne le premier modèle disponible parmi les candidats."""
         configured = getattr(settings, "GEMINI_MODEL", None)
+        # Si un modèle est configuré et qu'il est valide, on le prend
         if configured:
             try:
-                # Vérifier si le modèle est accessible
                 genai.GenerativeModel(configured)
                 logger.info(f"Modèle configuré {configured} est valide")
                 return configured
             except Exception:
                 logger.warning(f"Modèle configuré {configured} invalide, recherche d'alternatives")
 
-        # Parcourir les candidats
-        for model_name in self.MODEL_CANDIDATES:
-            try:
-                genai.GenerativeModel(model_name)
-                logger.info(f"Modèle {model_name} trouvé et valide")
-                return model_name
-            except Exception:
-                continue
+        # Sinon, interroger l'API pour lister les modèles disponibles
+        try:
+            available_models = genai.list_models()
+            for model in available_models:
+                # On ne garde que les modèles de génération (pas les embeddings)
+                if "generateContent" in model.supported_generation_methods:
+                    model_name = model.name
+                    # On préfère les modèles "flash" ou "pro"
+                    for candidate in self.MODEL_CANDIDATES:
+                        if candidate in model_name:
+                            logger.info(f"Modèle trouvé via list_models: {model_name}")
+                            return model_name
+            # Si aucun candidat n'est trouvé, on prend le premier modèle de génération
+            for model in available_models:
+                if "generateContent" in model.supported_generation_methods:
+                    logger.info(f"Modèle par défaut trouvé: {model.name}")
+                    return model.name
+        except Exception as e:
+            logger.warning(f"Impossible de lister les modèles: {e}")
 
-        # Fallback : utiliser le premier candidat même s'il est invalide (l'erreur sera capturée plus tard)
-        logger.error("Aucun modèle Gemini valide trouvé, utilisation de gemini-1.5-flash par défaut")
-        return "gemini-1.5-flash"
+        # Fallback absolu
+        fallback = self.MODEL_CANDIDATES[0]
+        logger.warning(f"Aucun modèle valide trouvé, utilisation de {fallback} par défaut")
+        return fallback
 
     def _create_cache(self) -> None:
         """Crée un cache contextuel pour le prompt système (préchargement)."""
@@ -166,7 +177,6 @@ class LLMEngine:
                 "max_output_tokens": settings.MAX_TOKENS,
             }
 
-            # Utiliser asyncio.to_thread pour l'appel synchrone
             response = await asyncio.to_thread(
                 model.generate_content,
                 user_prompt,
@@ -208,14 +218,14 @@ class LLMEngine:
                 "max_output_tokens": settings.MAX_TOKENS,
             }
 
-            # Streaming synchrone exécuté dans un thread
+            # Streaming synchrone dans un thread
             def _stream():
                 response = model.generate_content(user_prompt, generation_config=config, stream=True)
                 for chunk in response:
                     if chunk.text:
                         yield chunk.text
 
-            # Utiliser un générateur asynchrone via queue
+            # Utiliser une queue asynchrone pour transférer les tokens du thread vers l'event loop
             loop = asyncio.get_running_loop()
             queue = asyncio.Queue()
 

@@ -29,14 +29,12 @@ token_counter = TokenCounter(daily_quota=settings.GROQ_DAILY_TOKEN_QUOTA)
 class LLMEngine:
     """Advanced RAG engine with hybrid search, reranking, and streaming using Google Gemini."""
 
-    # Liste des modèles valides par ordre de préférence
-    GEMINI_MODELS = [
-       "gemini-2.5-flash",         # existant
-       "gemini-2.0-flash-exp",     # nouveau
-       "gemini-2.0-flash",         # existant
-       "gemini-1.5-flash",         # nouveau
-       "gemini-1.5-pro",           # nouveau
-       "gemini-flash-latest",      # existant
+    # Modèles à essayer (par ordre de préférence)
+    MODEL_CANDIDATES = [
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
     ]
 
     def __init__(self, vector_store: VectorStore):
@@ -47,29 +45,37 @@ class LLMEngine:
         self._cache_id = None
         self._system_prompt = prompt_manager.get_system_prompt()
 
-        # Déterminer le modèle à utiliser
+        # Sélectionner un modèle valide
         self.model_name = self._select_valid_model()
-        logger.info(f"Utilisation du modèle Gemini: {self.model_name}")
+        logger.info(f"✅ Utilisation du modèle Gemini: {self.model_name}")
 
         # Créer le cache (si supporté)
         self._create_cache()
 
     def _select_valid_model(self) -> str:
-        """Sélectionne le premier modèle valide parmi la liste."""
-        configured_model = getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash")
-        # Si le modèle configuré est dans la liste, on le garde
-        if configured_model in self.GEMINI_MODELS:
-            return configured_model
-        # Sinon on essaie la liste
-        for model in self.GEMINI_MODELS:
+        """Trouve le premier modèle disponible parmi les candidats."""
+        # D'abord, essayer le modèle configuré
+        configured = getattr(settings, "GEMINI_MODEL", None)
+        if configured:
             try:
-                # Tester la disponibilité du modèle (appel léger)
-                genai.GenerativeModel(model)
-                return model
+                # Vérifier si le modèle est accessible
+                genai.GenerativeModel(configured)
+                logger.info(f"Modèle configuré {configured} est valide")
+                return configured
+            except Exception:
+                logger.warning(f"Modèle configuré {configured} invalide, recherche d'alternatives")
+
+        # Parcourir les candidats
+        for model_name in self.MODEL_CANDIDATES:
+            try:
+                genai.GenerativeModel(model_name)
+                logger.info(f"Modèle {model_name} trouvé et valide")
+                return model_name
             except Exception:
                 continue
-        # Fallback absolu
-        logger.warning("Aucun modèle connu disponible, utilisation de gemini-1.5-flash")
+
+        # Fallback : utiliser le premier candidat même s'il est invalide (l'erreur sera capturée plus tard)
+        logger.error("Aucun modèle Gemini valide trouvé, utilisation de gemini-1.5-flash par défaut")
         return "gemini-1.5-flash"
 
     def _create_cache(self) -> None:
@@ -107,7 +113,6 @@ class LLMEngine:
         """Retourne le modèle Gemini avec ou sans cache."""
         try:
             if self._cache_id:
-                # Essayer avec cached_content
                 return genai.GenerativeModel(
                     model_name=self.model_name,
                     cached_content=self._cache_id
@@ -124,21 +129,6 @@ class LLMEngine:
                 model_name=self.model_name,
                 system_instruction=self._system_prompt
             )
-
-    async def _generate_content_async(self, model, prompt, stream=False, config=None):
-        """
-        Exécute model.generate_content dans un thread et retourne le résultat.
-        Si stream=True, retourne un itérateur synchrone qui sera consommé progressivement.
-        """
-        def _sync_generate():
-            return model.generate_content(
-                prompt,
-                generation_config=config,
-                stream=stream
-            )
-        # Exécution dans un thread pour ne pas bloquer l'event loop
-        result = await asyncio.to_thread(_sync_generate)
-        return result
 
     def _build_user_prompt(self, question: str, context: str = "", history: Optional[List[Dict[str, str]]] = None) -> str:
         parts = []
@@ -176,7 +166,12 @@ class LLMEngine:
                 "max_output_tokens": settings.MAX_TOKENS,
             }
 
-            response = await self._generate_content_async(model, user_prompt, stream=False, config=config)
+            # Utiliser asyncio.to_thread pour l'appel synchrone
+            response = await asyncio.to_thread(
+                model.generate_content,
+                user_prompt,
+                generation_config=config
+            )
             answer = response.text
             token_est = len(answer) // 4 + len(user_prompt) // 4
             await token_counter.add(token_est)
@@ -213,21 +208,20 @@ class LLMEngine:
                 "max_output_tokens": settings.MAX_TOKENS,
             }
 
-            # Exécuter la génération en streaming dans un thread séparé
-            def _stream_generator():
+            # Streaming synchrone exécuté dans un thread
+            def _stream():
                 response = model.generate_content(user_prompt, generation_config=config, stream=True)
                 for chunk in response:
                     if chunk.text:
                         yield chunk.text
 
-            # Utiliser un thread pour itérer et envoyer les tokens via une queue asynchrone
+            # Utiliser un générateur asynchrone via queue
             loop = asyncio.get_running_loop()
             queue = asyncio.Queue()
 
-            def _run_stream():
+            def _runner():
                 try:
-                    for token in _stream_generator():
-                        # Mettre le token dans la queue de manière thread-safe
+                    for token in _stream():
                         asyncio.run_coroutine_threadsafe(queue.put(token), loop)
                 except Exception as e:
                     asyncio.run_coroutine_threadsafe(queue.put(e), loop)
@@ -235,7 +229,7 @@ class LLMEngine:
                     asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
             # Lancer le thread
-            thread = await asyncio.to_thread(_run_stream)
+            await asyncio.to_thread(_runner)
 
             full_text = ""
             while True:

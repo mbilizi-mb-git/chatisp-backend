@@ -31,9 +31,12 @@ class LLMEngine:
 
     # Liste des modèles valides par ordre de préférence
     GEMINI_MODELS = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-2.0-flash-exp",
+       "gemini-2.5-flash",         # existant
+       "gemini-2.0-flash-exp",     # nouveau
+       "gemini-2.0-flash",         # existant
+       "gemini-1.5-flash",         # nouveau
+       "gemini-1.5-pro",           # nouveau
+       "gemini-flash-latest",      # existant
     ]
 
     def __init__(self, vector_store: VectorStore):

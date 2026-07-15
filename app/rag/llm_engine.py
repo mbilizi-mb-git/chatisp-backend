@@ -29,12 +29,13 @@ token_counter = TokenCounter(daily_quota=settings.GROQ_DAILY_TOKEN_QUOTA)
 class LLMEngine:
     """Advanced RAG engine with hybrid search, reranking, and streaming using Google Gemini."""
 
-    # Liste des modèles à essayer (par ordre de préférence)
-    MODEL_CANDIDATES = [
-        "gemini-2.0-flash-exp",
+    # Modèles préférés (ordre de priorité)
+    PREFERRED_MODELS = [
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
         "gemini-1.5-pro",
         "gemini-1.5-flash",
-        "gemini-2.0-flash",
     ]
 
     def __init__(self, vector_store: VectorStore):
@@ -53,9 +54,9 @@ class LLMEngine:
         self._create_cache()
 
     def _select_valid_model(self) -> str:
-        """Sélectionne le premier modèle disponible parmi les candidats."""
+        """Sélectionne le premier modèle disponible selon les préférences."""
+        # 1. Essayer le modèle configuré dans .env
         configured = getattr(settings, "GEMINI_MODEL", None)
-        # Si un modèle est configuré et qu'il est valide, on le prend
         if configured:
             try:
                 genai.GenerativeModel(configured)
@@ -64,29 +65,35 @@ class LLMEngine:
             except Exception:
                 logger.warning(f"Modèle configuré {configured} invalide, recherche d'alternatives")
 
-        # Sinon, interroger l'API pour lister les modèles disponibles
+        # 2. Obtenir la liste des modèles disponibles depuis l'API
         try:
             available_models = genai.list_models()
-            for model in available_models:
-                # On ne garde que les modèles de génération (pas les embeddings)
-                if "generateContent" in model.supported_generation_methods:
-                    model_name = model.name
-                    # On préfère les modèles "flash" ou "pro"
-                    for candidate in self.MODEL_CANDIDATES:
-                        if candidate in model_name:
-                            logger.info(f"Modèle trouvé via list_models: {model_name}")
-                            return model_name
-            # Si aucun candidat n'est trouvé, on prend le premier modèle de génération
-            for model in available_models:
-                if "generateContent" in model.supported_generation_methods:
-                    logger.info(f"Modèle par défaut trouvé: {model.name}")
-                    return model.name
+            available_names = [
+                model.name for model in available_models
+                if "generateContent" in model.supported_generation_methods
+            ]
+            logger.info(f"Modèles disponibles: {available_names}")
+
+            # Sélectionner le meilleur modèle disponible
+            for preferred in self.PREFERRED_MODELS:
+                # Vérifier si le modèle préféré est disponible (correspondance partielle)
+                for available in available_names:
+                    if preferred in available or available in preferred:
+                        logger.info(f"Modèle préféré trouvé: {available}")
+                        return available
+
+            # Si aucun préféré, prendre le premier disponible
+            if available_names:
+                fallback = available_names[0]
+                logger.info(f"Aucun modèle préféré trouvé, utilisation de {fallback}")
+                return fallback
+
         except Exception as e:
             logger.warning(f"Impossible de lister les modèles: {e}")
 
-        # Fallback absolu
-        fallback = self.MODEL_CANDIDATES[0]
-        logger.warning(f"Aucun modèle valide trouvé, utilisation de {fallback} par défaut")
+        # 3. Fallback ultime (peu probable)
+        fallback = "gemini-1.5-flash"
+        logger.warning(f"Fallback absolu: {fallback}")
         return fallback
 
     def _create_cache(self) -> None:

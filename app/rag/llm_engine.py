@@ -29,27 +29,65 @@ token_counter = TokenCounter(daily_quota=settings.GROQ_DAILY_TOKEN_QUOTA)
 class LLMEngine:
     """Advanced RAG engine with hybrid search, reranking, and streaming using Google Gemini."""
 
+    # Liste des modèles valides par ordre de préférence
+    GEMINI_MODELS = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-2.0-flash-exp",
+    ]
+
     def __init__(self, vector_store: VectorStore):
         self.vector_store = vector_store
         genai.configure(api_key=settings.GEMINI_API_KEY)
         self._embedding_model = None
+        self._cached_content = None
+        self._cache_id = None
         self._system_prompt = prompt_manager.get_system_prompt()
 
-        # Modèle par défaut
-        self.model_name = getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash")
-        if self.model_name == "gemini-2.5-flash":
-            self.model_name = "gemini-1.5-flash"
-            logger.warning("Modèle gemini-2.5-flash non disponible, utilisation de gemini-1.5-flash")
+        # Déterminer le modèle à utiliser
+        self.model_name = self._select_valid_model()
+        logger.info(f"Utilisation du modèle Gemini: {self.model_name}")
 
-        # Liste de modèles de fallback (ordre de préférence)
-        self.fallback_models = [
-            self.model_name,
-            "gemini-2.0-flash",
-            "gemini-1.5-pro",
-            "gemini-pro",
-        ]
+        # Créer le cache (si supporté)
+        self._create_cache()
+
+    def _select_valid_model(self) -> str:
+        """Sélectionne le premier modèle valide parmi la liste."""
+        configured_model = getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash")
+        # Si le modèle configuré est dans la liste, on le garde
+        if configured_model in self.GEMINI_MODELS:
+            return configured_model
+        # Sinon on essaie la liste
+        for model in self.GEMINI_MODELS:
+            try:
+                # Tester la disponibilité du modèle (appel léger)
+                genai.GenerativeModel(model)
+                return model
+            except Exception:
+                continue
+        # Fallback absolu
+        logger.warning("Aucun modèle connu disponible, utilisation de gemini-1.5-flash")
+        return "gemini-1.5-flash"
+
+    def _create_cache(self) -> None:
+        """Crée un cache contextuel pour le prompt système (préchargement)."""
+        try:
+            logger.info("Création du cache contextuel Gemini...")
+            self._cached_content = genai.caching.CachedContent.create(
+                model=self.model_name,
+                display_name="chatisp_system_prompt",
+                system_instruction=self._system_prompt,
+                ttl=settings.GEMINI_CACHE_TTL,
+            )
+            self._cache_id = self._cached_content.name
+            logger.info(f"Cache créé avec succès, ID: {self._cache_id}")
+        except Exception as e:
+            logger.warning(f"Impossible de créer le cache (utilisation sans cache): {e}")
+            self._cached_content = None
+            self._cache_id = None
 
     async def load_embedding_model(self) -> None:
+        """Charge explicitement le modèle d'embedding (préchargement)."""
         if self._embedding_model is None:
             logger.info("Chargement du modèle d'embedding...")
             self._embedding_model = await asyncio.to_thread(
@@ -62,37 +100,54 @@ class LLMEngine:
             await self.load_embedding_model()
         return self._embedding_model
 
-    def _generate_with_fallback(self, user_prompt: str, stream: bool = False):
-        """Méthode synchrone qui essaie plusieurs modèles Gemini en cas d'échec."""
-        last_error = None
-        for model_name in self.fallback_models:
-            try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
+    def _get_model(self):
+        """Retourne le modèle Gemini avec ou sans cache."""
+        try:
+            if self._cache_id:
+                # Essayer avec cached_content
+                return genai.GenerativeModel(
+                    model_name=self.model_name,
+                    cached_content=self._cache_id
+                )
+            else:
+                return genai.GenerativeModel(
+                    model_name=self.model_name,
                     system_instruction=self._system_prompt
                 )
-                if stream:
-                    return model.generate_content(
-                        user_prompt,
-                        generation_config={
-                            "temperature": settings.TEMPERATURE,
-                            "max_output_tokens": settings.MAX_TOKENS,
-                        },
-                        stream=True
-                    )
-                else:
-                    return model.generate_content(
-                        user_prompt,
-                        generation_config={
-                            "temperature": settings.TEMPERATURE,
-                            "max_output_tokens": settings.MAX_TOKENS,
-                        }
-                    )
-            except Exception as e:
-                logger.warning(f"Modèle {model_name} échoué: {e}")
-                last_error = e
-                continue
-        raise last_error
+        except TypeError:
+            # Fallback si cached_content n'est pas supporté
+            logger.warning("cached_content not supported, using system_instruction fallback")
+            return genai.GenerativeModel(
+                model_name=self.model_name,
+                system_instruction=self._system_prompt
+            )
+
+    async def _generate_content_async(self, model, prompt, stream=False, config=None):
+        """
+        Exécute model.generate_content dans un thread et retourne le résultat.
+        Si stream=True, retourne un itérateur synchrone qui sera consommé progressivement.
+        """
+        def _sync_generate():
+            return model.generate_content(
+                prompt,
+                generation_config=config,
+                stream=stream
+            )
+        # Exécution dans un thread pour ne pas bloquer l'event loop
+        result = await asyncio.to_thread(_sync_generate)
+        return result
+
+    def _build_user_prompt(self, question: str, context: str = "", history: Optional[List[Dict[str, str]]] = None) -> str:
+        parts = []
+        if context:
+            parts.append(f"CONTEXTE DOCUMENTAIRE:\n{context}")
+        if history:
+            history_text = "\n".join(
+                [f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[-settings.MEMORY_LIMIT:]]
+            )
+            parts.append(f"Historique:\n{history_text}")
+        parts.append(f"Question: {question}")
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Public methods
@@ -112,11 +167,13 @@ class LLMEngine:
                 return self._get_quota_exceeded_response()
 
             user_prompt = self._build_user_prompt(question, context, history)
+            model = self._get_model()
+            config = {
+                "temperature": settings.TEMPERATURE,
+                "max_output_tokens": settings.MAX_TOKENS,
+            }
 
-            response = await asyncio.to_thread(
-                self._generate_with_fallback, user_prompt, False
-            )
-
+            response = await self._generate_content_async(model, user_prompt, stream=False, config=config)
             answer = response.text
             token_est = len(answer) // 4 + len(user_prompt) // 4
             await token_counter.add(token_est)
@@ -147,18 +204,47 @@ class LLMEngine:
                 return
 
             user_prompt = self._build_user_prompt(question, context, history)
+            model = self._get_model()
+            config = {
+                "temperature": settings.TEMPERATURE,
+                "max_output_tokens": settings.MAX_TOKENS,
+            }
 
-            # Appel synchrone dans un thread pour le streaming
-            response = await asyncio.to_thread(
-                self._generate_with_fallback, user_prompt, True
-            )
+            # Exécuter la génération en streaming dans un thread séparé
+            def _stream_generator():
+                response = model.generate_content(user_prompt, generation_config=config, stream=True)
+                for chunk in response:
+                    if chunk.text:
+                        yield chunk.text
+
+            # Utiliser un thread pour itérer et envoyer les tokens via une queue asynchrone
+            loop = asyncio.get_running_loop()
+            queue = asyncio.Queue()
+
+            def _run_stream():
+                try:
+                    for token in _stream_generator():
+                        # Mettre le token dans la queue de manière thread-safe
+                        asyncio.run_coroutine_threadsafe(queue.put(token), loop)
+                except Exception as e:
+                    asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+                finally:
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+            # Lancer le thread
+            thread = await asyncio.to_thread(_run_stream)
 
             full_text = ""
-            for chunk in response:
-                if chunk.text:
-                    token = chunk.text
-                    full_text += token
-                    yield token
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    logger.error(f"Streaming error: {item}")
+                    break
+                token = item
+                full_text += token
+                yield token
 
             token_est = len(full_text) // 4 + len(user_prompt) // 4
             await token_counter.add(token_est)
@@ -172,22 +258,6 @@ class LLMEngine:
         except Exception as e:
             logger.exception("Unexpected error in streaming")
             yield self._create_empty_response()
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-
-    def _build_user_prompt(self, question: str, context: str = "", history: Optional[List[Dict[str, str]]] = None) -> str:
-        parts = []
-        if context:
-            parts.append(f"CONTEXTE DOCUMENTAIRE:\n{context}")
-        if history:
-            history_text = "\n".join(
-                [f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[-settings.MEMORY_LIMIT:]]
-            )
-            parts.append(f"Historique:\n{history_text}")
-        parts.append(f"Question: {question}")
-        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Hybrid search & reranking (inchangé)
@@ -259,7 +329,7 @@ class LLMEngine:
         return [docs_with_scores[i] for i in selected_indices]
 
     # ------------------------------------------------------------------
-    # Fallback responses & utilities (inchangés)
+    # Fallback responses & utilities
     # ------------------------------------------------------------------
     def _get_timeout_response(self) -> str:
         return "⏳ Oups, la réponse a pris trop de temps... Peux-tu reformuler ou réessayer ?"

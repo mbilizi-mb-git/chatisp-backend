@@ -11,15 +11,18 @@ from sqlalchemy.orm import declarative_base
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
-
 settings = get_settings()
 
-# Create async engine
+# Optimisé pour un VPS 8 Go / 4 vCPU, avec PgBouncer en amont
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     future=True,
-    pool_pre_ping=True,  # verify connections before using
+    pool_size=150,               # connexions par worker
+    max_overflow=150,            # total max ~300 par worker (si 4 workers → 1200)
+    pool_timeout=3,
+    pool_recycle=600,
+    pool_pre_ping=True,
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -30,9 +33,7 @@ AsyncSessionLocal = async_sessionmaker(
 
 Base = declarative_base()
 
-
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Dependency that provides an async database session."""
     async with AsyncSessionLocal() as session:
         try:
             yield session
@@ -42,26 +43,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         finally:
             await session.close()
 
-
 async def init_db() -> None:
-    """Create database tables if they don't exist."""
     async with engine.begin() as conn:
-        # Import all models here to ensure they are registered with Base
-        from app.models import user, conversation, message  # noqa
-
+        from app.models import user, conversation, message
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables initialized (if not existed).")
-
+    logger.info("Database tables initialized.")
 
 async def close_db() -> None:
-    """
-    Close the database engine and release all connections.
-    Should be called during application shutdown.
-    """
     try:
         await engine.dispose()
-        logger.info("Database engine disposed successfully")
+        logger.info("Database engine disposed.")
     except Exception as e:
-        logger.exception("Error while disposing database engine: %s", e)
-        # Re-raise to ensure the application knows shutdown may be incomplete
+        logger.exception("Error disposing database engine: %s", e)
         raise

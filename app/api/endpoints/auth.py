@@ -24,6 +24,7 @@ from app.schemas.auth import (
 from app.services.user_service import UserService
 from app.api.dependencies import get_current_user
 from app.models.user import User
+from app.utils.cache import email_cache  # Nouvel import
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -197,6 +198,7 @@ async def check_email(
     email: str,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> EmailCheckResponse:
+    # 1. Vérification du format
     from pydantic import EmailStr
     valid = True
     try:
@@ -205,8 +207,19 @@ async def check_email(
         valid = False
         return EmailCheckResponse(valid=False, exists=False)
 
+    # 2. Cache lookup (validité + existence)
+    cached = email_cache.get(email)
+    if cached is not None:
+        # cached est un booléen (True = email existe, False = n'existe pas)
+        return EmailCheckResponse(valid=True, exists=cached)
+
+    # 3. Requête DB
     service = UserService(db)
     exists = await service.check_email_exists(email)
+
+    # 4. Mise en cache (durée par défaut 30s)
+    email_cache.set(email, exists)
+
     return EmailCheckResponse(valid=True, exists=exists)
 
 

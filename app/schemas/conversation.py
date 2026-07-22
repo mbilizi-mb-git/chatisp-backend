@@ -50,6 +50,9 @@ class ConversationDetail(BaseModel):
     pinned_at: Optional[datetime] = Field(None, description="Pin timestamp")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
-    messages: Optional[List[MessageOut]] = Field(None, description="List of messages (if requested)")
+    messages: Optional[List[MessageOut]] = Field(
+        default=None,
+        description="List of messages (if requested)"
+    )
 
     model_config = ConfigDict(from_attributes=True)

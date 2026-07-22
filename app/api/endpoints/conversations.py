@@ -139,4 +139,8 @@ async def get_conversation_detail(
     if not conv or conv.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Conversation non trouvée")
 
+    # Éviter le lazy loading en définissant messages à None si non chargé
+    if not include_messages:
+        conv.messages = None
+
     return ConversationDetail.model_validate(conv)
